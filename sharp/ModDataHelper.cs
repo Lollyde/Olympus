@@ -1,45 +1,55 @@
-﻿using Mono.Cecil;
-using Mono.Cecil.Cil;
-using MonoMod.Utils;
-using System;
-using System.Collections;
+﻿using System;
 using System.Collections.Generic;
-using System.Drawing;
-using System.Globalization;
 using System.IO;
 using System.IO.Compression;
-using System.Linq;
-using System.Net;
-using System.Reflection;
-using System.Runtime.InteropServices;
 using System.Security.Cryptography;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
 using YYProject.XXHash;
-using System.Diagnostics;
+using System.Linq;
 
 namespace Olympus
 {
-    public unsafe partial class CmdModList : Cmd<string, IEnumerator> {
 
-        public static HashAlgorithm Hasher = XXHash64.Create();
-        private static List<ModInfo> modlist;
+    public class ModDataHelper
+    {
+        private static ModDataHelper instance;
+        private static HashAlgorithm Hasher;
+        private static Dictionary<string, List<ModInfo>> modlist;
+        private static Dictionary<string, List<Dependency>> deplist;
 
+        public static ModDataHelper Instance { get { if (instance == null) instance = new ModDataHelper(); return instance; } }
 
-        public override IEnumerator Run(string root) {
-            root = Path.Combine(root, "Mods");
-            if (!Directory.Exists(root))
-                yield break;
-            modlist = new List<ModInfo>();
-            ModDataHelper.Instance.GetModList(root);
-            foreach (ModInfo item in ModDataHelper.Instance.GetModList(root))
-            {
-                yield return item;
-            }
+        private ModDataHelper()
+        {
+            Hasher = XXHash64.Create();
+            modlist = new Dictionary<string, List<ModInfo>>();
         }
 
-        private List<string> checkDeps()
+        public List<ModInfo> GetModList(string root)
+        {
+            // TODO up to date check??
+            if(!modlist.ContainsKey(root))
+            {
+                modlist[root] = new List<ModInfo>();
+                initializeModList(root);
+            }
+            if (NeedsRefresh(root))
+            {
+                RefreshModList(root);
+            }
+            return modlist[root];
+        }
+
+        public List<Dependency> GetMissingDeps(string root)
+        {
+            if (!deplist.ContainsKey(root) || NeedsRefresh(root))
+            {
+                deplist[root] = new List<Dependency>();
+                RefreshDependencies(root);
+            }
+            throw new NotImplementedException();
+        }
+
+        private void RefreshDependencies(string root)
         {
             // loop over all mods
             // if it has no dependency that isnt everest add it to "deps_statisfied"
@@ -48,8 +58,7 @@ namespace Olympus
             // if all dependencies are statisfied, move to "deps_statisfied"
             // after one iteration, if there are any mods left in "to_check", there are missing dependencies
             List<ModInfo> deps_statisfied = new List<ModInfo>(), to_check = new List<ModInfo>();
-            List<string> missing_deps = new List<string>();
-            foreach (ModInfo mod in modlist)
+            foreach (ModInfo mod in modlist[root])
             {
                 bool statisfied = true;
                 foreach (Dependency dep in mod.Deps)
@@ -57,43 +66,28 @@ namespace Olympus
                     statisfied = dep.Name.Equals("Everest") || has_mod(dep.Name, to_check) || has_mod(dep.Name, deps_statisfied);
                     if (!statisfied)
                     {
-                        //Console.Error.WriteLine($"[DepCheck] first round: {mod.Name} is missing dependency: {dep.Name}, skipping all other dependencies");
                         to_check.Add(mod);
                         goto SKIP;
                     }
                 }
-                //Console.Error.WriteLine($"[DepCheck] first round: {mod.Name} has all dependencies statisfied!");
                 deps_statisfied.Add(mod);
-                SKIP:;
+            SKIP:;
             }
-
-            //Console.Error.WriteLine($"[DepCheck] out of {modlist.Count} mods, {to_check.Count} mods had at least one dependency missing after the first round");
 
             foreach (ModInfo mod in to_check)
             {
-                //bool allmet = true;
                 foreach (Dependency dep in mod.Deps)
                 {
                     bool statisfied = dep.Name.Equals("Everest") || has_mod(dep.Name, deps_statisfied) || has_mod(dep.Name, to_check);
                     if (!statisfied)
                     {
-                        if (!missing_deps.Contains(dep.Name))
+                        if (!deplist[root].Contains(dep))
                         {
-                            //Console.Error.WriteLine($"[DepCheck] second round: {mod.Name} is missing dependency: {dep.Name}, adding to list of missing dependencies");
-                            missing_deps.Add(dep.Name);
+                            deplist[root].Add(dep);
                         }
-                        else
-                        {
-                            //Console.Error.WriteLine($"[DepCheck] second round: {mod.Name} is missing dependency: {dep.Name}, however it is already listed as missing.");
-                        }
-                        
-                        //allmet = false;
                     }
                 }
-                //if (allmet) Console.Error.WriteLine($"[DepCheck] second round: {mod.Name} had previously unstatisfied dependencies, now has all dependencies met!");
             }
-            //Console.Error.WriteLine($"[DepCheck] end: {missing_deps.Count} total missing dependencies detected");
-            return missing_deps;
         }
 
         private bool has_mod(string name, List<ModInfo> list)
@@ -105,7 +99,17 @@ namespace Olympus
             return false;
         }
 
-        private void loadMods(string root)
+        private void RefreshModList(string root)
+        {
+            throw new NotImplementedException();
+        }
+
+        private bool NeedsRefresh(string root)
+        {
+            return false;
+        }
+
+        private void initializeModList(string root)
         {
             List<string> blacklist;
             string blacklistPath = Path.Combine(root, "blacklist.txt");
@@ -140,7 +144,7 @@ namespace Olympus
                         info.Parse(reader);
                 }
 
-                modlist.Add(info);
+                modlist[root].Add(info);
             }
 
             files = Directory.GetDirectories(root);
@@ -185,10 +189,56 @@ namespace Olympus
                 {
                 }
 
-                modlist.Add(info);
-               
+                modlist[root].Add(info);
+
             }
         }
+    }
 
+    public class ModInfo {
+        public string Path;
+        public string Hash;
+        public bool IsZIP;
+        public bool IsBlacklisted;
+        public string Filename;
+
+        public string Name;
+        public string Version;
+        public string DLL;
+        public bool IsValid;
+        public List<Dependency> Deps;
+
+        public void Parse(TextReader reader) {
+            if (reader != null && YamlHelper.Deserializer.Deserialize(reader) is List<object> yamlRoot &&
+                yamlRoot.Count != 0 && yamlRoot[0] is Dictionary<object, object> yamlEntry) {
+
+                IsValid = yamlEntry.TryGetValue("Name", out object yamlName) &&
+                !string.IsNullOrEmpty(Name = yamlName as string) &&
+                yamlEntry.TryGetValue("Version", out object yamlVersion) &&
+                !string.IsNullOrEmpty(Version = yamlVersion as string);
+
+                if (yamlEntry.TryGetValue("DLL", out object yamlDLL))
+                    DLL = yamlDLL as string;
+                yamlEntry.TryGetValue("Dependencies", out object depsobj);
+                var list = depsobj as List<object>;
+                Deps = new List<Dependency>();
+                foreach (var item in list)
+                {
+                    var item1 = item as Dictionary<object, object>;
+                    if (item1.TryGetValue("Name", out object depName) && item1.TryGetValue("Version", out object depVersion))
+                    {
+                        var tmp = new Dependency();
+                        tmp.Name = depName as string;
+                        tmp.Version = depVersion as string;
+                        Deps.Add(tmp);
+                    }
+                }
+            }
+        }
+    }
+
+    public class Dependency
+    {
+        public string Name, Version;
     }
 }
